@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VEASLY · 인스타 성과 대시보드</title>
+    <style>
+      :root {
+        --bg: #0f0d1a;
+        --panel: #1a1726;
+        --line: #2c2640;
+        --text: #ece9f5;
+        --muted: #9b93b5;
+        --purple: #7c3aed;
+        --purple-soft: #2a2140;
+        --green: #2f9e6f;
+        --pink: #d6336c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      }
+      header {
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      header h1 { font-size: 18px; margin: 0; }
+      .acc { color: var(--muted); font-size: 13px; }
+      .acc b { color: var(--text); }
+      .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+      .controls input, .controls select {
+        padding: 6px 8px; border-radius: 6px;
+        border: 1px solid var(--line); background: var(--panel); color: var(--text);
+      }
+      .controls input { width: 64px; }
+      .controls select { cursor: pointer; }
+      button {
+        padding: 6px 14px; border-radius: 6px; border: 0;
+        background: var(--purple); color: #fff; cursor: pointer; font-weight: 600;
+      }
+      button:disabled { opacity: .5; cursor: default; }
+      .wrap { padding: 16px 24px 60px; overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; min-width: 1100px; }
+      th, td {
+        padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      th {
+        position: sticky; top: 0; background: var(--purple-soft);
+        font-size: 12px; color: #cdbfff; text-align: right; user-select: none; cursor: pointer;
+      }
+      th.left, td.left { text-align: left; }
+      th.grow { background: #18331f; color: #9be3bd; }
+      th.rate { background: #3a1228; color: #ffadcb; }
+      td.cap {
+        max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; color: var(--muted);
+      }
+      tr:hover td { background: #181426; }
+      a { color: #b794ff; text-decoration: none; }
+      .rate-pill {
+        display: inline-block; padding: 2px 8px; border-radius: 999px;
+        background: #3a1228; color: #ff8fb6; font-weight: 600;
+      }
+      .muted { color: var(--muted); }
+      .loading, .error { padding: 40px; text-align: center; color: var(--muted); }
+      .error { color: #ff8a8a; }
+      .num { font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>📊 VEASLY 인스타 성과</h1>
+      <div class="acc" id="acc">불러오는 중…</div>
+      <div class="controls">
+        <label class="muted">정렬</label>
+        <select id="sort">
+          <option value="게시일|-1">게시일 최신순</option>
+          <option value="게시일|1">게시일 오래된순</option>
+          <option value="도달|-1">도달 많은순</option>
+          <option value="노출|-1" selected>노출(Views) 많은순</option>
+          <option value="좋아요|-1">좋아요 많은순</option>
+          <option value="댓글|-1">댓글 많은순</option>
+          <option value="저장|-1">저장 많은순</option>
+          <option value="공유|-1">공유 많은순</option>
+          <option value="참여율|-1">참여율 높은순</option>
+          <option value="팔로워증감|-1">팔로워 증감 많은순</option>
+          <option value="프로필방문|-1">프로필방문 많은순</option>
+        </select>
+        <label class="muted">글 수</label>
+        <input id="limit" type="number" value="25" min="1" max="100" />
+        <button id="reload">새로고침</button>
+      </div>
+    </header>
+    <div class="wrap">
+      <div id="status" class="loading">데이터 불러오는 중…</div>
+      <table id="tbl" hidden>
+        <thead>
+          <tr id="head"></tr>
+        </thead>
+        <tbody id="body"></tbody>
+      </table>
+    </div>
+
+    <script>
+      // 시트 컬럼 정의 (key = /instagram/report 응답의 필드명)
+      const COLS = [
+        { key: '게시일', label: '게시일', type: 'date', cls: 'left' },
+        { key: '콘텐츠유형', label: '유형', cls: 'left' },
+        { key: '제목주제', label: '게시물 제목 / 주제', cls: 'left cap' },
+        { key: '도달', label: '도달' },
+        { key: '노출', label: '노출(Views)' },
+        { key: '좋아요', label: '좋아요' },
+        { key: '댓글', label: '댓글' },
+        { key: '저장', label: '저장' },
+        { key: '공유', label: '공유' },
+        { key: '참여율', label: '참여율 %', headCls: 'rate', type: 'rate' },
+        { key: '팔로워증감', label: '팔로워↑', headCls: 'grow' },
+        { key: '프로필방문', label: '프로필방문', headCls: 'grow' },
+        { key: '링크클릭', label: '링크클릭', headCls: 'grow' },
+      ];
+
+      let rows = [];
+      let sortKey = '노출';
+      let sortDir = -1; // -1 내림차순
+
+      const fmt = (v) =>
+        v == null ? '<span class="muted">—</span>' : Number(v).toLocaleString();
+      const fmtDate = (v) => (v ? new Date(v).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
+
+      function renderHead() {
+        document.getElementById('head').innerHTML =
+          COLS.map((c) => {
+            const arrow = sortKey === c.key ? (sortDir < 0 ? ' ▼' : ' ▲') : '';
+            return `<th class="${c.cls || ''} ${c.headCls || ''}" data-key="${c.key}">${c.label}${arrow}</th>`;
+          }).join('') + '<th>링크</th>';
+        document.querySelectorAll('th[data-key]').forEach((th) =>
+          th.addEventListener('click', () => {
+            const k = th.dataset.key;
+            if (sortKey === k) sortDir *= -1;
+            else { sortKey = k; sortDir = -1; }
+            syncSortDropdown();
+            renderBody();
+            renderHead();
+          }),
+        );
+      }
+
+      // 현재 정렬 상태를 드롭다운에 반영 (해당 옵션 없으면 선택 해제)
+      function syncSortDropdown() {
+        const sel = document.getElementById('sort');
+        const val = `${sortKey}|${sortDir}`;
+        sel.value = [...sel.options].some((o) => o.value === val) ? val : '';
+      }
+
+      function renderBody() {
+        const sorted = [...rows].sort((a, b) => {
+          const x = a[sortKey], y = b[sortKey];
+          if (x == null) return 1;
+          if (y == null) return -1;
+          if (typeof x === 'string') return sortDir * x.localeCompare(y);
+          return sortDir * (x - y);
+        });
+        document.getElementById('body').innerHTML = sorted
+          .map((r) => {
+            const tds = COLS.map((c) => {
+              let v = r[c.key];
+              if (c.type === 'date') return `<td class="left num">${fmtDate(v)}</td>`;
+              if (c.type === 'rate')
+                return `<td class="num">${v == null ? '<span class="muted">—</span>' : `<span class="rate-pill">${v}%</span>`}</td>`;
+              if (c.cls && c.cls.includes('left'))
+                return `<td class="${c.cls}" title="${(v ?? '').toString().replace(/"/g, '')}">${v ?? '—'}</td>`;
+              return `<td class="num">${fmt(v)}</td>`;
+            }).join('');
+            return `<tr>${tds}<td><a href="${r.permalink}" target="_blank">열기 ↗</a></td></tr>`;
+          })
+          .join('');
+      }
+
+      async function load() {
+        const limit = document.getElementById('limit').value || 25;
+        const status = document.getElementById('status');
+        const tbl = document.getElementById('tbl');
+        const btn = document.getElementById('reload');
+        status.hidden = false; status.className = 'loading';
+        status.textContent = '데이터 불러오는 중…'; tbl.hidden = true; btn.disabled = true;
+        try {
+          const res = await fetch(`/instagram/report?limit=${limit}`);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          rows = data.rows || [];
+          document.getElementById('acc').innerHTML = data.account
+            ? `@<b>${data.account.username ?? '?'}</b> · 팔로워 <b>${fmt(data.account.followers)}</b> · 글 <b>${fmt(data.account.mediaCount)}</b>`
+            : '';
+          renderHead();
+          renderBody();
+          status.hidden = true; tbl.hidden = false;
+        } catch (e) {
+          status.className = 'error';
+          status.textContent = '불러오기 실패: ' + e.message + ' (서버/토큰 확인)';
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      document.getElementById('reload').addEventListener('click', load);
+      document.getElementById('sort').addEventListener('change', (e) => {
+        const [k, d] = e.target.value.split('|');
+        sortKey = k;
+        sortDir = Number(d);
+        renderBody();
+        renderHead();
+      });
+      load();
+    </script>
+  </body>
+</html>

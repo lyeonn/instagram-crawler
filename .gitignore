@@ -1,0 +1,41 @@
+# ── 실행에 필요한 것만 커밋. 나머지는 전부 무시 ──
+
+# dependencies
+/node_modules
+
+# build output
+/dist
+
+# env (토큰 들어감 — 절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# 구글 서비스계정 키 (절대 커밋 금지)
+service-account.json
+*.serviceaccount.json
+
+# python 가상환경 / 캐시
+.venv/
+.venv-vl/
+__pycache__/
+*.py[cod]
+
+# 대용량 데이터 / 처리 결과물 (돌리는데 불필요)
+/test-images
+/vl_results
+
+# 작업 메모 / 다이어그램 / 발표자료 (돌리는데 불필요)
+/NOTES.md
+/진행정리.md
+/instagram-auto.png
+/instagram-auto.excalidraw
+/구조도.excalidraw
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea
