@@ -42,6 +42,10 @@ export class SheetsService {
   private get keyCol(): string {
     return (process.env.GSHEET_KEY_COL || 'Z').toUpperCase();
   }
+  /** 제목주제가 기록되는 열 (map 에서 역으로 찾음, 기본 E) */
+  private get titleCol(): string {
+    return Object.keys(this.map).find((c) => this.map[c] === '제목주제') ?? 'E';
+  }
 
   private get sheets(): sheets_v4.Sheets {
     if (this._sheets) return this._sheets;
@@ -70,6 +74,32 @@ export class SheetsService {
     if (col === 'B') return String(v).slice(0, 10); // 게시일 -> YYYY-MM-DD
     if (col === 'L') return `${v}%`; // 참여율 -> "16.84%" (셀이 알아서 % 처리)
     return v as number;
+  }
+
+  /**
+   * 이미 시트에 기록된 permalink -> 제목주제 맵.
+   * VLM 재분석을 건너뛸 판단에 쓴다 (제목주제 칸이 이미 차 있으면 그 글은 분석 완료로 간주).
+   */
+  async getExistingTitles(): Promise<Map<string, string>> {
+    const start = this.startRow;
+    const res = await this.sheets.spreadsheets.values.batchGet({
+      spreadsheetId: this.spreadsheetId,
+      ranges: [
+        `${this.tab}!${this.keyCol}${start}:${this.keyCol}`, // 키(permalink)
+        `${this.tab}!${this.titleCol}${start}:${this.titleCol}`, // 제목주제
+      ],
+    });
+    const keys = res.data.valueRanges?.[0]?.values ?? [];
+    const titles = res.data.valueRanges?.[1]?.values ?? [];
+    const out = new Map<string, string>();
+    keys.forEach((row, i) => {
+      const link = row?.[0];
+      const title = titles[i]?.[0];
+      if (link && title && String(title).trim()) {
+        out.set(String(link), String(title).trim());
+      }
+    });
+    return out;
   }
 
   /**

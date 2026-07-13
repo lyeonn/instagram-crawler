@@ -21,16 +21,27 @@ export class InstagramController {
   }
 
   /**
-   * GET /instagram/analyze-titles?limit=30 — VLM(Gemma-26B)으로 제목주제 생성 후
-   * 시트를 "전체 삭제 → 30개 새로 기록". 사진+캡션(해시태그) 기반.
-   * ⚠️ 사이드카(vl_server.py)가 켜져 있어야 함. 수동 칸(담당자/메모)은 지워짐.
+   * GET /instagram/analyze-titles?limit=30 — VLM 으로 제목주제 생성 후 시트에 upsert.
+   * 사진+캡션(해시태그) 기반. 사용 모델은 사이드카의 VL_MODEL 환경변수로 결정.
+   * ⚠️ 사이드카(vl_server.py)가 켜져 있어야 함.
+   *
+   * 기본은 "이미 분석된 글(제목주제 칸이 차 있음)은 건너뛰고" 새 글만 VLM 실행.
+   * force=1 이면 전부 다시 분석. upsert 라 수동 칸(담당자/메모)/줄 위치는 보존됨.
    */
   @Get('analyze-titles')
-  async analyzeTitles(@Query('limit') limit?: string) {
+  async analyzeTitles(@Query('limit') limit?: string, @Query('force') force?: string) {
     const n = limit ? Number(limit) : 30;
-    const report = await this.ig.getSheetReport(n, true);
-    const result = await this.sheets.replaceReport(report.rows);
-    return { ok: true, model: 'Gemma-26B (VLM)', ...result };
+    const existing = force === '1' ? new Map<string, string>() : await this.sheets.getExistingTitles();
+    const report = await this.ig.getSheetReport(n, true, existing);
+    const skipped = report.rows.filter((r) => existing.has(String(r.permalink))).length;
+    const result = await this.sheets.upsertReport(report.rows);
+    return {
+      ok: true,
+      model: process.env.VL_MODEL || 'lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit',
+      analyzed: report.rows.length - skipped,
+      skipped,
+      ...result,
+    };
   }
 
   /** GET /instagram/media?limit=25 — 본인 게시글 목록 (좋아요/댓글만) */

@@ -280,7 +280,28 @@ export class InstagramService {
    * 시트 양식(컬럼 순서)에 맞춘 리포트 행 배열.
    * 게시일/담당자/콘텐츠유형/제목/도달/노출/좋아요/댓글/저장/공유/참여율/팔로워증감/프로필방문/링크클릭
    */
-  async getSheetReport(limit = 25, useVlm = false): Promise<{
+  /**
+   * 게시물의 제목주제 결정.
+   * 이미 분석된 글(existingTitles 에 값 있음)은 VLM 재호출 없이 기존 값 재사용.
+   */
+  private async resolveTitle(
+    m: IgMedia,
+    useVlm: boolean,
+    existingTitles?: Map<string, string>,
+  ): Promise<string | null> {
+    const prev = m.permalink ? existingTitles?.get(m.permalink) : undefined;
+    if (prev) return prev; // 이미 분석됨 → 재분석 스킵
+    if (useVlm) {
+      return (await this.analyzeTitle(this.imageUrlOf(m), m.caption)) ?? this.toTitle(m.caption);
+    }
+    return this.toTitle(m.caption);
+  }
+
+  async getSheetReport(
+    limit = 25,
+    useVlm = false,
+    existingTitles?: Map<string, string>,
+  ): Promise<{
     account: { username?: unknown; followers?: unknown; mediaCount?: unknown };
     rows: Array<Record<string, unknown>>;
   }> {
@@ -307,10 +328,7 @@ export class InstagramService {
           게시일: m.timestamp,
           담당자: null, // API 제공 안 됨 — 수동 입력
           콘텐츠유형: this.toKoreanType(m),
-          제목주제: useVlm
-            ? (await this.analyzeTitle(this.imageUrlOf(m), m.caption)) ??
-              this.toTitle(m.caption)
-            : this.toTitle(m.caption),
+          제목주제: await this.resolveTitle(m, useVlm, existingTitles),
           도달: i?.reach ?? null,
           노출: i?.views ?? null,
           좋아요: m.like_count ?? null,
