@@ -9,6 +9,7 @@ export type ReportRow = Record<string, unknown>;
 export class SheetsService {
   private readonly logger = new Logger(SheetsService.name);
   private _sheets?: sheets_v4.Sheets;
+  private _sheetId?: number;
 
   // 보고서 양식 컬럼 매핑. 담당자(C)/메모(P)/No.(A) 는 안 건드림(수동).
   // D(콘텐츠유형)=드롭다운 매핑, E(제목주제)=캡션 앞부분 자동 기록.
@@ -67,6 +68,42 @@ export class SheetsService {
     return this._sheets;
   }
 
+  /** 탭 이름 -> 시트 gid (정렬 API 에 필요, 1회 조회 후 캐시) */
+  private async getSheetId(): Promise<number> {
+    if (this._sheetId != null) return this._sheetId;
+    const meta = await this.sheets.spreadsheets.get({
+      spreadsheetId: this.spreadsheetId,
+      fields: 'sheets.properties(sheetId,title)',
+    });
+    const sh = meta.data.sheets?.find((s) => s.properties?.title === this.tab);
+    if (sh?.properties?.sheetId == null) throw new Error(`탭 '${this.tab}' 을 찾을 수 없다.`);
+    this._sheetId = sh.properties.sheetId;
+    return this._sheetId;
+  }
+
+  /** 데이터 영역(start행~)을 게시일(B열) 내림차순 정렬 — 최신 글이 맨 위로. */
+  async sortByDateDesc(): Promise<void> {
+    const sheetId = await this.getSheetId();
+    await this.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            sortRange: {
+              range: {
+                sheetId,
+                startRowIndex: this.startRow - 1, // 0-indexed, 헤더 제외
+                startColumnIndex: 0,
+                endColumnIndex: 26, // A:Z (수동칸·키열 포함해 행째로 이동)
+              },
+              sortSpecs: [{ dimensionIndex: 1, sortOrder: 'DESCENDING' }], // B=게시일
+            },
+          },
+        ],
+      },
+    });
+  }
+
   // USER_ENTERED 로 기록 → 날짜/퍼센트가 셀 서식대로 해석됨
   private toCell(col: string, r: ReportRow): string | number {
     const v = r[this.map[col]];
@@ -107,7 +144,10 @@ export class SheetsService {
    * - permalink(숨김 키 열 R) 로 기존 줄 매칭 → 숫자 칸만 최신값 갱신 (줄 위치/수동칸/서식 보존)
    * - 신규 글은 마지막 줄 뒤에 추가 (담당자/유형/제목/메모는 빈칸)
    */
-  async upsertReport(rows: ReportRow[]): Promise<{ updated: number; added: number }> {
+  async upsertReport(
+    rows: ReportRow[],
+    opts: { skipTitle?: boolean } = {},
+  ): Promise<{ updated: number; added: number }> {
     const start = this.startRow;
 
     // 키 열(permalink) 읽어서 줄 매핑
@@ -143,6 +183,8 @@ export class SheetsService {
         data.push({ range: `${this.tab}!${this.keyCol}${rowNum}`, values: [[link]] });
       }
       for (const col of Object.keys(this.map)) {
+        // 지표 동기화(skipTitle)는 제목주제 칸을 건드리지 않는다 (VLM 결과 보존)
+        if (opts.skipTitle && col === this.titleCol) continue;
         data.push({ range: `${this.tab}!${col}${rowNum}`, values: [[this.toCell(col, r)]] });
       }
     }
@@ -154,7 +196,12 @@ export class SheetsService {
       });
     }
 
-    this.logger.log(`시트 동기화: 갱신 ${updated} / 신규 ${added}`);
+    // 신규 글이 맨 아래 붙으므로, 갱신 후 게시일 내림차순으로 재정렬 (최신이 위)
+    if (added > 0) await this.sortByDateDesc();
+
+    this.logger.log(
+      `시트 동기화: 갱신 ${updated} / 신규 ${added}${opts.skipTitle ? ' (제목 보존)' : ''}`,
+    );
     return { updated, added };
   }
 

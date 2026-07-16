@@ -16,7 +16,8 @@ export class InstagramController {
   @Get('sync-sheet')
   async syncSheet(@Query('limit') limit?: string) {
     const report = await this.ig.getSheetReport(limit ? Number(limit) : 25);
-    const result = await this.sheets.upsertReport(report.rows);
+    // 지표만 갱신, 제목주제(VLM 결과)는 보존
+    const result = await this.sheets.upsertReport(report.rows, { skipTitle: true });
     return { ok: true, ...result, total: report.rows.length };
   }
 

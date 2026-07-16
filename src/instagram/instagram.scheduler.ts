@@ -19,7 +19,8 @@ export class InstagramScheduler {
     this.logger.log(`[자정 동기화] 시작 (최근 ${limit}개)`);
     try {
       const report = await this.ig.getSheetReport(limit);
-      const result = await this.sheets.upsertReport(report.rows);
+      // 지표만 갱신하고 제목주제(VLM 결과)는 건드리지 않는다
+      const result = await this.sheets.upsertReport(report.rows, { skipTitle: true });
       this.logger.log(
         `[자정 동기화] 완료 — 갱신 ${result.updated} / 신규 ${result.added}`,
       );
