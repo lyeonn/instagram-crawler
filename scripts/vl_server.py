@@ -59,6 +59,29 @@ def clean(s):
     return (s or "").strip().strip('"').replace("\n", " ")
 
 
+# VEASLY 게시물 캡션은 전부 동일한 홍보 템플릿이라, 그대로 요약에 넣으면
+# 모델이 이미지 내용을 버리고 캡션(홍보문구)만 요약한다 → 모든 글이 같은 제목.
+# 요약 단계에 넣기 전에 홍보 보일러플레이트 줄을 제거한다.
+_PROMO_KW = (
+    "VEASLY", "AISELY", "韓國代購", "代購", "代购", "購買連結", "购买链接",
+    "免運", "免运", "累積點數", "累积点数", "折抵", "偶像周邊", "偶像周边",
+    "所有韓國商品", "所有韩国商品", "指定金額", "留言", "購買", "购买",
+)
+
+
+def strip_promo(caption):
+    """캡션에서 공통 홍보문구/해시태그 줄을 제거. 남는 고유 내용만 반환(없으면 '')."""
+    kept = []
+    for line in (caption or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if any(kw in s for kw in _PROMO_KW):
+            continue
+        kept.append(s)
+    return "\n".join(kept)
+
+
 # ── mlx 전용 단일 스레드: 로드와 추론을 모두 여기서 ──────────────
 _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 model = processor = config = None
@@ -115,8 +138,9 @@ def _infer(image_url, caption):
         spec, gen = V.split_hashtags(caption)
         htxt = ("고유: " + (" ".join("#" + t for t in spec) or "(없음)") + " / "
                 "일반(무시): " + (" ".join("#" + t for t in gen) or "(없음)"))
+        cap_clean = strip_promo(caption)                                          # 공통 홍보문구 제거
         ocr = step(P_OCR, image=fed)                                              # 1) OCR
-        zh = step(P_SUM.format(ocr=ocr, caption=(caption[:400] or "(없음)"), hashtags=htxt))  # 2) 요약(번체)
+        zh = step(P_SUM.format(ocr=ocr, caption=(cap_clean[:400] or "(없음)"), hashtags=htxt))  # 2) 요약(번체)
         ko = step(P_TRANS.format(txt=zh))                                         # 3) 번역(한국어)
         print(f"[vl_server] {time.time() - t0:.1f}s  {ko[:30]}")
         return {"title_ko": ko, "title_zh": zh, "ocr": ocr}

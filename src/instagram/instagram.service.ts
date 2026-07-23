@@ -22,6 +22,18 @@ export class InstagramService {
   private readonly logger = new Logger(InstagramService.name);
   private readonly base = 'https://graph.instagram.com/v23.0';
 
+  // VLM 사이드카는 단일 스레드(순차 처리)라, 여러 요청을 한꺼번에 열어두면
+  // 큐 대기 중 Node fetch 타임아웃에 걸려 폴백된다. 호출을 직렬화해 열린 요청을 1건으로 유지.
+  private vlmChain: Promise<unknown> = Promise.resolve();
+  private serializeVlm<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.vlmChain.then(fn, fn);
+    this.vlmChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   private get token(): string {
     const t = process.env.INSTAGRAM_ACCESS_TOKEN;
     if (!t) {
@@ -226,28 +238,36 @@ export class InstagramService {
   }
 
   /**
-   * VLM 사이드카 호출: 사진 + 캡션 -> 한국어 제목.
+   * VLM 사이드카 호출: 사진 + 캡션 -> { 번체(대만) 요약, 한국어 요약 }.
    * 사이드카(VL_SERVICE_URL, 기본 localhost:8088)가 꺼져있거나 실패하면 null.
    */
-  async analyzeTitle(imageUrl?: string | null, caption?: string): Promise<string | null> {
+  async analyzeTitle(
+    imageUrl?: string | null,
+    caption?: string,
+  ): Promise<{ ko: string | null; zh: string | null } | null> {
     if (!imageUrl) return null;
     const base = process.env.VL_SERVICE_URL || 'http://127.0.0.1:8088';
-    try {
-      const res = await fetch(`${base}/analyze`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ image_url: imageUrl, caption: caption ?? '' }),
-      });
-      if (!res.ok) {
-        this.logger.warn(`VLM 사이드카 ${res.status}`);
+    // 사이드카 호출은 직렬화 (동시 요청 폭주 → 타임아웃 폴백 방지)
+    return this.serializeVlm(async () => {
+      try {
+        const res = await fetch(`${base}/analyze`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ image_url: imageUrl, caption: caption ?? '' }),
+        });
+        if (!res.ok) {
+          this.logger.warn(`VLM 사이드카 ${res.status}`);
+          return null;
+        }
+        const j = (await res.json()) as { title_ko?: string; title_zh?: string };
+        const ko = j.title_ko?.trim() || null;
+        const zh = j.title_zh?.trim() || null;
+        return ko || zh ? { ko, zh } : null;
+      } catch (e) {
+        this.logger.warn(`VLM 사이드카 연결 실패: ${(e as Error).message}`);
         return null;
       }
-      const j = (await res.json()) as { title_ko?: string };
-      return j.title_ko?.trim() || null;
-    } catch (e) {
-      this.logger.warn(`VLM 사이드카 연결 실패: ${(e as Error).message}`);
-      return null;
-    }
+    });
   }
 
   /** 캡션 -> 짧은 제목 (첫 줄, 해시태그 줄 제외, 40자까지) */
@@ -281,26 +301,28 @@ export class InstagramService {
    * 게시일/담당자/콘텐츠유형/제목/도달/노출/좋아요/댓글/저장/공유/참여율/팔로워증감/프로필방문/링크클릭
    */
   /**
-   * 게시물의 제목주제 결정.
+   * 게시물의 제목주제 결정 → { 한국어(ko), 번체·대만(zh) }.
    * 이미 분석된 글(existingTitles 에 값 있음)은 VLM 재호출 없이 기존 값 재사용.
    */
   private async resolveTitle(
     m: IgMedia,
     useVlm: boolean,
-    existingTitles?: Map<string, string>,
-  ): Promise<string | null> {
+    existingTitles?: Map<string, { ko: string | null; zh: string | null }>,
+  ): Promise<{ ko: string | null; zh: string | null }> {
     const prev = m.permalink ? existingTitles?.get(m.permalink) : undefined;
-    if (prev) return prev; // 이미 분석됨 → 재분석 스킵
+    if (prev) return prev; // 이미 분석됨 → 재분석 스킵 (대만/한국 기존값 그대로 보존)
     if (useVlm) {
-      return (await this.analyzeTitle(this.imageUrlOf(m), m.caption)) ?? this.toTitle(m.caption);
+      const r = await this.analyzeTitle(this.imageUrlOf(m), m.caption);
+      if (r) return r;
+      return { ko: this.toTitle(m.caption), zh: null }; // 사이드카 실패 → 캡션 폴백(한국만)
     }
-    return this.toTitle(m.caption);
+    return { ko: this.toTitle(m.caption), zh: null };
   }
 
   async getSheetReport(
     limit = 25,
     useVlm = false,
-    existingTitles?: Map<string, string>,
+    existingTitles?: Map<string, { ko: string | null; zh: string | null }>,
   ): Promise<{
     account: { username?: unknown; followers?: unknown; mediaCount?: unknown };
     rows: Array<Record<string, unknown>>;
@@ -324,11 +346,13 @@ export class InstagramService {
         const engagementRate = denom
           ? Number(((interactions / denom) * 100).toFixed(2))
           : null;
+        const title = await this.resolveTitle(m, useVlm, existingTitles);
         return {
           게시일: m.timestamp,
           담당자: null, // API 제공 안 됨 — 수동 입력
           콘텐츠유형: this.toKoreanType(m),
-          제목주제: await this.resolveTitle(m, useVlm, existingTitles),
+          제목주제_대만: title.zh, // 번체(대만) 요약
+          제목주제_한국: title.ko, // 한국어 요약
           도달: i?.reach ?? null,
           노출: i?.views ?? null,
           좋아요: m.like_count ?? null,

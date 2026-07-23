@@ -11,22 +11,24 @@ export class SheetsService {
   private _sheets?: sheets_v4.Sheets;
   private _sheetId?: number;
 
-  // 보고서 양식 컬럼 매핑. 담당자(C)/메모(P)/No.(A) 는 안 건드림(수동).
-  // D(콘텐츠유형)=드롭다운 매핑, E(제목주제)=캡션 앞부분 자동 기록.
+  // 보고서 양식 컬럼 매핑. No.(A)/담당자(C)/그 외 수동칸(R 이후)은 안 건드림.
+  // D(콘텐츠유형)=드롭다운, E(링크)=🔗 하이퍼링크, F/G(제목주제 대만/한국)=VLM 결과.
   private readonly map: Record<string, string> = {
     B: '게시일',
     D: '콘텐츠유형',
-    E: '제목주제',
-    F: '도달',
-    G: '노출',
-    H: '좋아요',
-    I: '댓글',
-    J: '저장',
-    K: '공유',
-    L: '참여율',
-    M: '팔로워증감',
-    N: '프로필방문',
-    O: '링크클릭',
+    E: '링크', // permalink 로부터 =HYPERLINK(...,"🔗") 생성
+    F: '제목주제_대만', // 번체(대만) 요약
+    G: '제목주제_한국', // 한국어 요약
+    H: '도달',
+    I: '노출',
+    J: '좋아요',
+    K: '댓글',
+    L: '저장',
+    M: '공유',
+    N: '참여율',
+    O: '팔로워증감',
+    P: '프로필방문',
+    Q: '링크클릭',
   };
 
   private get spreadsheetId(): string {
@@ -41,11 +43,20 @@ export class SheetsService {
     return Number(process.env.GSHEET_DATA_START_ROW || 8);
   }
   private get keyCol(): string {
-    return (process.env.GSHEET_KEY_COL || 'Z').toUpperCase();
+    // permalink 숨김 키. 링크·제목(대만/한국) 2열 삽입으로 Z→AB 로 이동.
+    return (process.env.GSHEET_KEY_COL || 'AB').toUpperCase();
   }
-  /** 제목주제가 기록되는 열 (map 에서 역으로 찾음, 기본 E) */
-  private get titleCol(): string {
-    return Object.keys(this.map).find((c) => this.map[c] === '제목주제') ?? 'E';
+  /** VLM 결과가 기록되는 제목주제 열(대만·한국) — 지표 동기화 시 보존 대상 */
+  private get titleCols(): string[] {
+    return Object.keys(this.map).filter((c) => this.map[c].startsWith('제목주제'));
+  }
+  /** '분석 완료' 판단 기준 열 = 한국어 제목주제 (기본 G) */
+  private get titleColKo(): string {
+    return Object.keys(this.map).find((c) => this.map[c] === '제목주제_한국') ?? 'G';
+  }
+  /** 대만어 제목주제 열 (기본 F) */
+  private get titleColZh(): string {
+    return Object.keys(this.map).find((c) => this.map[c] === '제목주제_대만') ?? 'F';
   }
 
   private get sheets(): sheets_v4.Sheets {
@@ -94,7 +105,7 @@ export class SheetsService {
                 sheetId,
                 startRowIndex: this.startRow - 1, // 0-indexed, 헤더 제외
                 startColumnIndex: 0,
-                endColumnIndex: 26, // A:Z (수동칸·키열 포함해 행째로 이동)
+                endColumnIndex: 28, // A:AB (수동칸·키열 포함해 행째로 이동)
               },
               sortSpecs: [{ dimensionIndex: 1, sortOrder: 'DESCENDING' }], // B=게시일
             },
@@ -104,36 +115,51 @@ export class SheetsService {
     });
   }
 
-  // USER_ENTERED 로 기록 → 날짜/퍼센트가 셀 서식대로 해석됨
+  // USER_ENTERED 로 기록 → 날짜/퍼센트/수식이 셀 서식대로 해석됨
   private toCell(col: string, r: ReportRow): string | number {
-    const v = r[this.map[col]];
+    const field = this.map[col];
+    // 링크: permalink 로부터 클릭 가능한 🔗 하이퍼링크 생성
+    if (field === '링크') {
+      const url = String(r.permalink ?? '');
+      return url ? `=HYPERLINK("${url}","🔗")` : '';
+    }
+    const v = r[field];
     if (v == null) return '';
-    if (col === 'B') return String(v).slice(0, 10); // 게시일 -> YYYY-MM-DD
-    if (col === 'L') return `${v}%`; // 참여율 -> "16.84%" (셀이 알아서 % 처리)
+    if (field === '게시일') return String(v).slice(0, 10); // -> YYYY-MM-DD
+    if (field === '참여율') return `${v}%`; // -> "16.84%" (셀이 알아서 % 처리)
     return v as number;
   }
 
   /**
-   * 이미 시트에 기록된 permalink -> 제목주제 맵.
-   * VLM 재분석을 건너뛸 판단에 쓴다 (제목주제 칸이 이미 차 있으면 그 글은 분석 완료로 간주).
+   * 이미 시트에 기록된 permalink -> { 한국(ko), 대만(zh) } 맵.
+   * 한국어 제목주제 칸이 차 있으면 그 글은 '분석 완료'로 간주해 VLM 재분석을 건너뛴다.
+   * (재분석 스킵 시 대만/한국 기존값을 그대로 되써서 보존하려고 둘 다 읽어둔다.)
    */
-  async getExistingTitles(): Promise<Map<string, string>> {
+  async getExistingTitles(): Promise<
+    Map<string, { ko: string | null; zh: string | null }>
+  > {
     const start = this.startRow;
     const res = await this.sheets.spreadsheets.values.batchGet({
       spreadsheetId: this.spreadsheetId,
       ranges: [
         `${this.tab}!${this.keyCol}${start}:${this.keyCol}`, // 키(permalink)
-        `${this.tab}!${this.titleCol}${start}:${this.titleCol}`, // 제목주제
+        `${this.tab}!${this.titleColKo}${start}:${this.titleColKo}`, // 한국
+        `${this.tab}!${this.titleColZh}${start}:${this.titleColZh}`, // 대만
       ],
     });
     const keys = res.data.valueRanges?.[0]?.values ?? [];
-    const titles = res.data.valueRanges?.[1]?.values ?? [];
-    const out = new Map<string, string>();
+    const kos = res.data.valueRanges?.[1]?.values ?? [];
+    const zhs = res.data.valueRanges?.[2]?.values ?? [];
+    const out = new Map<string, { ko: string | null; zh: string | null }>();
     keys.forEach((row, i) => {
       const link = row?.[0];
-      const title = titles[i]?.[0];
-      if (link && title && String(title).trim()) {
-        out.set(String(link), String(title).trim());
+      const ko = kos[i]?.[0];
+      if (link && ko && String(ko).trim()) {
+        const zh = zhs[i]?.[0];
+        out.set(String(link), {
+          ko: String(ko).trim(),
+          zh: zh && String(zh).trim() ? String(zh).trim() : null,
+        });
       }
     });
     return out;
@@ -183,8 +209,8 @@ export class SheetsService {
         data.push({ range: `${this.tab}!${this.keyCol}${rowNum}`, values: [[link]] });
       }
       for (const col of Object.keys(this.map)) {
-        // 지표 동기화(skipTitle)는 제목주제 칸을 건드리지 않는다 (VLM 결과 보존)
-        if (opts.skipTitle && col === this.titleCol) continue;
+        // 지표 동기화(skipTitle)는 제목주제(대만·한국) 칸을 건드리지 않는다 (VLM 결과 보존)
+        if (opts.skipTitle && this.titleCols.includes(col)) continue;
         data.push({ range: `${this.tab}!${col}${rowNum}`, values: [[this.toCell(col, r)]] });
       }
     }
@@ -214,7 +240,7 @@ export class SheetsService {
     // 1) 데이터 영역 전체 비우기 (서식은 유지, 값만 삭제)
     await this.sheets.spreadsheets.values.clear({
       spreadsheetId: this.spreadsheetId,
-      range: `${this.tab}!A${start}:Z`,
+      range: `${this.tab}!A${start}:AB`,
     });
     // 2) 처음부터 새로 기록
     const data: sheets_v4.Schema$ValueRange[] = [];

@@ -32,7 +32,10 @@ export class InstagramController {
   @Get('analyze-titles')
   async analyzeTitles(@Query('limit') limit?: string, @Query('force') force?: string) {
     const n = limit ? Number(limit) : 30;
-    const existing = force === '1' ? new Map<string, string>() : await this.sheets.getExistingTitles();
+    const existing =
+      force === '1'
+        ? new Map<string, { ko: string | null; zh: string | null }>()
+        : await this.sheets.getExistingTitles();
     const report = await this.ig.getSheetReport(n, true, existing);
     const skipped = report.rows.filter((r) => existing.has(String(r.permalink))).length;
     const result = await this.sheets.upsertReport(report.rows);
