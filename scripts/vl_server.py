@@ -12,6 +12,7 @@
 
 import sys
 import os
+import re
 import time
 import tempfile
 import asyncio
@@ -53,6 +54,19 @@ P_TRANS = (
     "② 고유명사(인물/브랜드)는 한국어 표기로 옮겨라.\n"
     "한국어 제목만 출력:\n{txt}"
 )
+# 1차 번역에 한자가 남으면 이 강화 프롬프트로 재번역 (한자 단어→한국어 예시를 폭넓게 명시)
+P_TRANS_STRICT = (
+    "아래 제목을 100% 한국어로만 다시 써라. 한자·중국어(번체/간체)가 단 한 글자라도 있으면 실패다.\n"
+    "한 글자씩 전부 한국어로 옮겨라. 단어 대응 예:\n"
+    "回歸/回归→컴백, 預告/预告→예고, 影片→영상, 公開/公开→공개, 首播→첫 방송, 續約/续约→재계약, "
+    "全員/全员→전원, 專輯/专辑→앨범, 新曲→신곡, 出道→데뷔, 禮盒/礼盒→기프트박스, 抽獎→추첨, "
+    "小卡→포토카드, 全新→완전 새로운, 台北→타이베이, 志龍→지드래곤, 神顏/신颜→신비주얼, "
+    "好物→굿즈, 私服→사복, 本命→최애, 全網/全网→전국, 少年的→소년의, 代言→광고모델, 化身→변신, "
+    "原宿→하라주쿠, 復古/复古→복고, 復古感→복고 감성, 神級/神级→신급, 舞台→무대.\n"
+    "예) 'NewJeans 回歸預告影片公開' → '뉴진스 컴백 예고 영상 공개'\n"
+    "한국어 제목만 출력:\n{txt}"
+)
+_HAN = re.compile(r"[㐀-鿿]")  # CJK 한자(번체/간체) 검출
 
 
 def clean(s):
@@ -111,6 +125,16 @@ def step(prompt_text, image=None):
     return clean(out.text if hasattr(out, "text") else str(out))
 
 
+def translate_clean(zh, tries=3):
+    """번체 → 한국어. 결과에 한자가 남으면 강화 프롬프트로 최대 tries회 재번역."""
+    ko = step(P_TRANS.format(txt=zh))
+    for _ in range(tries - 1):
+        if not _HAN.search(ko):
+            break
+        ko = step(P_TRANS_STRICT.format(txt=zh))
+    return ko
+
+
 def download(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -141,7 +165,7 @@ def _infer(image_url, caption):
         cap_clean = strip_promo(caption)                                          # 공통 홍보문구 제거
         ocr = step(P_OCR, image=fed)                                              # 1) OCR
         zh = step(P_SUM.format(ocr=ocr, caption=(cap_clean[:400] or "(없음)"), hashtags=htxt))  # 2) 요약(번체)
-        ko = step(P_TRANS.format(txt=zh))                                         # 3) 번역(한국어)
+        ko = translate_clean(zh)                                                  # 3) 번역(한국어, 한자 잔존 시 재시도)
         print(f"[vl_server] {time.time() - t0:.1f}s  {ko[:30]}")
         return {"title_ko": ko, "title_zh": zh, "ocr": ocr}
     finally:
@@ -161,6 +185,20 @@ async def analyze(r: Req):
     # 추론을 전용 스레드(executor)로 보냄 → 동시 요청도 자동으로 한 줄로 직렬화
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_ex, _infer, r.image_url, r.caption)
+
+
+class TransReq(BaseModel):
+    text: str = ""  # 번체중문 제목
+
+
+@app.post("/translate")
+async def translate(r: TransReq):
+    """이미 만들어진 번체 제목을 재OCR 없이 한국어로만 다시 번역 (한자 잔존 보정용)."""
+    if not r.text.strip():
+        return {"title_ko": ""}
+    loop = asyncio.get_event_loop()
+    ko = await loop.run_in_executor(_ex, translate_clean, r.text)
+    return {"title_ko": ko}
 
 
 @app.get("/health")
