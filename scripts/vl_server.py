@@ -62,7 +62,10 @@ P_TRANS_STRICT = (
     "全員/全员→전원, 專輯/专辑→앨범, 新曲→신곡, 出道→데뷔, 禮盒/礼盒→기프트박스, 抽獎→추첨, "
     "小卡→포토카드, 全新→완전 새로운, 台北→타이베이, 志龍→지드래곤, 神顏/신颜→신비주얼, "
     "好物→굿즈, 私服→사복, 本命→최애, 全網/全网→전국, 少年的→소년의, 代言→광고모델, 化身→변신, "
-    "原宿→하라주쿠, 復古/复古→복고, 復古感→복고 감성, 神級/神级→신급, 舞台→무대.\n"
+    "原宿→하라주쿠, 復古/复古→복고, 復古感→복고 감성, 神級/神级→신급, 舞台→무대, "
+    "美人魚→인어, 造型→콘셉트, 愛豆→아이돌, 女團/女团→걸그룹, 男團/男团→보이그룹, "
+    "同款→같은 상품, 周邊/周边→굿즈, 快閃店→팝업스토어, 首爾→서울, 圖鑑/图鉴→도감, 寶可夢/宝可梦→포켓몬, "
+    "腮紅→블러셔, 專輯/专辑→앨범, 太超過→너무 과하다.\n"
     "예) 'NewJeans 回歸預告影片公開' → '뉴진스 컴백 예고 영상 공개'\n"
     "한국어 제목만 출력:\n{txt}"
 )
@@ -70,7 +73,22 @@ _HAN = re.compile(r"[㐀-鿿]")  # CJK 한자(번체/간체) 검출
 
 
 def clean(s):
-    return (s or "").strip().strip('"').replace("\n", " ")
+    s = (s or "").strip()
+    # 모델이 프롬프트를 복창한 경우: 프롬프트는 "...출력:" 로 끝나므로 그 뒤 실제 답만 취함
+    for marker in ("출력:", "출력："):
+        if marker in s:
+            s = s.rsplit(marker, 1)[-1]
+    return s.strip().strip('"').replace("\n", " ").strip()
+
+
+# 프롬프트 지시문이 셀에 새어나온 흔적 (한자 검사만으론 못 잡음)
+_LEAK = re.compile(r"한국어로만|한국어 제목만|남기지 마|옮겨라|번체중문|다시 써라|①|②|실패다")
+_HANGUL = re.compile(r"[가-힣]")  # 대만(번체) 칸에 한글이 섞였는지 검출
+# 요약이 번체가 아니라 한국어로 나왔을 때 번체로 다시 뽑는 재시도 프롬프트
+P_SUM_RETRY = (
+    "다음 제목을 번체중문(繁體中文) 한 줄로만 다시 써라. 한국어·한글은 단 한 글자도 쓰지 마라. "
+    "브랜드·인물의 로마자(IVE, JYP 등)는 그대로 두고, 나머지는 전부 번체 한자로.\n번체 제목만 출력:\n{txt}"
+)
 
 
 # VEASLY 게시물 캡션은 전부 동일한 홍보 템플릿이라, 그대로 요약에 넣으면
@@ -125,11 +143,20 @@ def step(prompt_text, image=None):
     return clean(out.text if hasattr(out, "text") else str(out))
 
 
+def to_trad(zh, tries=3):
+    """요약(zh)에 한글이 섞였으면 번체로 다시 뽑는다."""
+    for _ in range(tries):
+        if not _HANGUL.search(zh):
+            break
+        zh = step(P_SUM_RETRY.format(txt=zh))
+    return zh
+
+
 def translate_clean(zh, tries=3):
     """번체 → 한국어. 결과에 한자가 남으면 강화 프롬프트로 최대 tries회 재번역."""
     ko = step(P_TRANS.format(txt=zh))
     for _ in range(tries - 1):
-        if not _HAN.search(ko):
+        if not _HAN.search(ko) and not _LEAK.search(ko):
             break
         ko = step(P_TRANS_STRICT.format(txt=zh))
     return ko
@@ -165,6 +192,7 @@ def _infer(image_url, caption):
         cap_clean = strip_promo(caption)                                          # 공통 홍보문구 제거
         ocr = step(P_OCR, image=fed)                                              # 1) OCR
         zh = step(P_SUM.format(ocr=ocr, caption=(cap_clean[:400] or "(없음)"), hashtags=htxt))  # 2) 요약(번체)
+        zh = to_trad(zh)                                                          # 한글 섞이면 번체로 재요약
         ko = translate_clean(zh)                                                  # 3) 번역(한국어, 한자 잔존 시 재시도)
         print(f"[vl_server] {time.time() - t0:.1f}s  {ko[:30]}")
         return {"title_ko": ko, "title_zh": zh, "ocr": ocr}
@@ -199,6 +227,20 @@ async def translate(r: TransReq):
     loop = asyncio.get_event_loop()
     ko = await loop.run_in_executor(_ex, translate_clean, r.text)
     return {"title_ko": ko}
+
+
+class TradReq(BaseModel):
+    text: str = ""  # 한글이 섞인 대만 제목
+
+
+@app.post("/to-trad")
+async def to_trad_ep(r: TradReq):
+    """대만(번체) 칸에 한국어가 섞인 경우, 재OCR 없이 번체로만 변환."""
+    if not r.text.strip():
+        return {"title_zh": ""}
+    loop = asyncio.get_event_loop()
+    zh = await loop.run_in_executor(_ex, to_trad, r.text)
+    return {"title_zh": zh}
 
 
 @app.get("/health")

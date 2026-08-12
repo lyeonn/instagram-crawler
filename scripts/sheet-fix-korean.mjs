@@ -11,6 +11,8 @@ const VL = process.env.VL_SERVICE_URL || 'http://127.0.0.1:8088';
 const id = process.env.GSHEET_ID, tab = process.env.GSHEET_TAB;
 const DATA_START = 8;
 const HAN = /[㐀-鿿]/;
+const LEAK = /한국어로만|한국어 제목만|남기지 마|옮겨라|번체중문|다시 써라|①|②|실패다/;
+const bad = (ko) => HAN.test(ko) || LEAK.test(ko);
 
 const creds = JSON.parse(readFileSync(process.env.GOOGLE_SERVICE_ACCOUNT_FILE, 'utf8'));
 const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
@@ -23,7 +25,7 @@ const fg = r.data.values ?? [];
 const targets = [];
 fg.forEach((x, i) => {
   const zh = (x[0] || '').trim(), ko = (x[1] || '').trim();
-  if (zh && HAN.test(ko)) targets.push({ row: DATA_START + i, zh, ko });
+  if (zh && bad(ko)) targets.push({ row: DATA_START + i, zh, ko });
 });
 console.log(`한자 잔존 ${targets.length}행 재번역` + (DRY ? ' (dry-run)' : ''));
 
@@ -38,7 +40,7 @@ let fixed = 0, still = 0;
 for (const t of targets) {
   let ko = '';
   try { ko = (await translate(t.zh)).trim(); } catch (e) { console.log(`  ${t.row}: 오류 ${e.message}`); continue; }
-  const ok = ko && !HAN.test(ko);
+  const ok = ko && !bad(ko);
   if (ok) fixed++; else still++;
   console.log(`  ${t.row}: ${ok ? '✅' : '△남음'} [${t.ko.slice(0, 16)}] → [${ko.slice(0, 22)}]`);
   if (ko) updates.push({ range: `${tab}!G${t.row}`, values: [[ko]] });
